@@ -610,14 +610,31 @@ static uintptr_t global_main_thread_id;
 
 typedef void* (*mmap_hook_type)( size_t size, size_t alignment, size_t* offset, size_t* mapped_size);
 typedef void (*munmap_hook_type)(void* address, size_t offset, size_t mapped_size);
+typedef void (*mcommit_hook_type)(void* address, size_t size);
+typedef void (*mdecommit_hook_type)(void* address, size_t size);
+typedef void (*vma_name_hook_type)(const char* name, const void* address, size_t size);
 
 static void*
 os_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_size);
 static void
 os_munmap(void* address, size_t offset, size_t mapped_size);
+static void
+os_mcommit(void* address, size_t size);
+static void
+os_mdecommit(void* address, size_t size);
+
+static void
+os_vma_name(const char* name, const void* address, size_t size) {
+#if defined(__linux__) || defined(__ANDROID__)
+	(void)prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, (uintptr_t)address, size, (uintptr_t)name);
+#endif
+}
 
 mmap_hook_type rp_mmap_hook = os_mmap;
 munmap_hook_type rp_munmap_hook = os_munmap;
+mcommit_hook_type rp_mcommit_hook = os_mcommit;
+mdecommit_hook_type rp_mdecommit_hook = os_mdecommit;
+vma_name_hook_type rp_name_hook = os_vma_name;
 
 static void*
 trampoline_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_size) {
@@ -627,6 +644,16 @@ trampoline_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_si
 static void
 trampoline_munmap(void* address, size_t offset, size_t mapped_size) {
   return rp_munmap_hook(address, offset, mapped_size);
+}
+
+static void
+trampoline_mcommit(void* address, size_t size) {
+  rp_mcommit_hook(address, size);
+}
+
+static void
+trampoline_mdecommit(void* address, size_t size) {
+  rp_mdecommit_hook(address, size);
 }
 
 //! Size classes
@@ -888,17 +915,17 @@ get_page_aligned_size(size_t size) {
 
 static void
 os_set_page_name(void* address, size_t size) {
+  const char* name = os_huge_pages ? global_config.huge_page_name : global_config.page_name;
 #if defined(__linux__) || defined(__ANDROID__)
-	const char* name = os_huge_pages ? global_config.huge_page_name : global_config.page_name;
-	if ((address == MAP_FAILED) || !name)
+	if ((address == MAP_FAILED) || !name) {
 		return;
-	// If the kernel does not support CONFIG_ANON_VMA_NAME or if the call fails
-	// (e.g. invalid name) it is a no-op basically.
-	(void)prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, (uintptr_t)address, size, (uintptr_t)name);
-#else
-	(void)sizeof(size);
-	(void)sizeof(address);
+  }
+#elif PLATFORM_WINDOWS
+	if (!address || !name) {
+		return;
+  }
 #endif
+  rp_name_hook(name, address, size);
 }
 
 #ifdef FEX_IOS_HOST
@@ -1342,8 +1369,9 @@ os_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_size) {
 	}
 #else
 	if (!ptr)
-		ptr = VirtualAlloc(0, map_size, (os_huge_pages ? MEM_LARGE_PAGES : 0) | MEM_RESERVE | do_commit, PAGE_READWRITE);
+		ptr = VirtualAlloc(0, map_size, (os_huge_pages ? MEM_LARGE_PAGES : 0) | MEM_RESERVE | do_commit | MEM_TOP_DOWN, PAGE_READWRITE);
 #endif
+	os_set_page_name(ptr, map_size);
 #ifdef FEX_IOS_HOST
 	/* ml465 (#76): verdict line. Anything rpmalloc owns that lands BELOW the
 	 * FEX band is guest-writable and can be scribbled (that is exactly how the
@@ -1373,8 +1401,7 @@ os_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_size) {
 			WriteFile(GetStdHandle((unsigned long)-12), buf, (unsigned long)i, &w, 0);
 		}
 	}
-#endif
-#else
+#endif#else
 	int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_UNINITIALIZED;
 #if defined(__APPLE__) && !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 	int fd = (int)VM_MAKE_TAG(240U);
@@ -3484,8 +3511,8 @@ rpmalloc_initialize(rpmalloc_interface_t* memory_interface) {
 	global_memory_interface = memory_interface ? memory_interface : &global_memory_interface_default;
 	if (!global_memory_interface->memory_map || !global_memory_interface->memory_unmap) {
 		global_memory_interface->memory_map = trampoline_mmap;
-		global_memory_interface->memory_commit = os_mcommit;
-		global_memory_interface->memory_decommit = os_mdecommit;
+		global_memory_interface->memory_commit = trampoline_mcommit;
+		global_memory_interface->memory_decommit = trampoline_mdecommit;
 		global_memory_interface->memory_unmap = trampoline_munmap;
 	}
 
