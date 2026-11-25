@@ -1401,7 +1401,8 @@ os_mmap(size_t size, size_t alignment, size_t* offset, size_t* mapped_size) {
 			WriteFile(GetStdHandle((unsigned long)-12), buf, (unsigned long)i, &w, 0);
 		}
 	}
-#endif#else
+#endif
+#else
 	int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_UNINITIALIZED;
 #if defined(__APPLE__) && !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 	int fd = (int)VM_MAKE_TAG(240U);
